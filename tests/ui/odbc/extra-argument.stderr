@@ -1,0 +1,7 @@
+error: expected 0 parameters, got 1
+ --> tests/ui/odbc/extra-argument.rs:2:13
+  |
+2 |     let _ = sqlx::query!("SELECT TOP 1 CAST(1 AS INTEGER) AS value FROM SYSPROGRESS.SYSTABLES", 1i32);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)

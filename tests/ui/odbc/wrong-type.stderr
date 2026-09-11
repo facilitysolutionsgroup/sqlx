@@ -1,0 +1,8 @@
+error[E0308]: mismatched types
+ --> tests/ui/odbc/wrong-type.rs:2:66
+  |
+2 |     let _ = sqlx::query!("SELECT CAST(? AS INTEGER) AS value  ", "wrong");
+  |                                                                  ^^^^^^^
+  |                                                                  |
+  |                                                                  expected `i32`, found `&str`
+  |                                                                  expected due to the type of this binding

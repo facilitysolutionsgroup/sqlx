@@ -49,6 +49,8 @@ pub mod migrate;
 
 #[cfg(feature = "macros")]
 pub const FOSS_DRIVERS: &[QueryDriver] = &[
+    #[cfg(feature = "odbc")]
+    QueryDriver::new::<sqlx_odbc::Odbc>(),
     #[cfg(feature = "mysql")]
     QueryDriver::new::<sqlx_mysql::MySql>(),
     #[cfg(feature = "postgres")]

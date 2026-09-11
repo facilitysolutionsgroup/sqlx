@@ -55,6 +55,8 @@ macro_rules! impl_prepare_describe_connection {
 
 // The paths below will also be emitted from the macros, so they need to match the final facade.
 mod sqlx {
+    #[cfg(feature = "odbc")]
+    pub use sqlx_odbc as odbc;
     #[cfg(feature = "mysql")]
     pub use sqlx_mysql as mysql;
 
@@ -86,4 +88,17 @@ impl_database_ext! {
     // Since proc-macros don't benefit from async, we can make a describe call directly
     // which also ensures that the database is closed afterwards, regardless of errors.
     describe-blocking: sqlx_sqlite::describe_blocking,
+}
+
+#[cfg(feature = "odbc")]
+impl_database_ext! { sqlx::odbc::Odbc, row: sqlx::odbc::OdbcRow, describe-blocking: describe_odbc, }
+
+#[cfg(feature = "odbc")]
+fn describe_odbc(query: &str, database_url: &str, config: &sqlx_core::config::drivers::Config) -> sqlx_core::Result<sqlx_core::describe::Describe<sqlx_odbc::Odbc>> {
+    static CACHE: crate::database::CachingDescribeBlocking<sqlx_odbc::Odbc> = crate::database::CachingDescribeBlocking::new();
+    let description = CACHE.describe(query, database_url, config)?;
+    if !matches!(&description.parameters, Some(either::Either::Left(_))) {
+        return Err(sqlx_core::Error::Protocol("ODBC driver did not provide parameter types for checked query".into()));
+    }
+    Ok(description)
 }

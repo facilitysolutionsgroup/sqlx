@@ -1,0 +1,7 @@
+error: ODBC checked queries require parameter type metadata, including in offline mode
+ --> tests/ui/odbc/missing-metadata.rs:2:13
+  |
+2 |     let _ = sqlx::query!("SELECT CAST(? AS INTEGER) AS value", 1i32);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
