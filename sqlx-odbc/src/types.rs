@@ -49,6 +49,53 @@ mod tests {
         round_trip(false);
     }
     #[test]
+    fn decimal_to_float_compatibility() {
+        for (text, expected, expected_f32) in [
+            ("0.00", 0.0, 0.0_f32),
+            (" -123.50 ", -123.5, -123.5_f32),
+            ("123456789.25", 123456789.25, 123456792.0_f32),
+        ] {
+            let value = OdbcValue {
+                type_info: OdbcTypeInfo("DECIMAL".into()),
+                data: Some(text.as_bytes().into()),
+            };
+            assert_eq!(value.try_decode::<f64>().unwrap(), expected);
+            assert_eq!(value.try_decode::<f32>().unwrap(), expected_f32);
+            assert_eq!(value.try_decode::<Option<f64>>().unwrap(), Some(expected));
+            assert_eq!(
+                <f64 as Decode<Odbc>>::decode(OdbcValueRef(&value)).unwrap(),
+                expected
+            );
+        }
+        let null = OdbcValue {
+            type_info: OdbcTypeInfo("DECIMAL".into()),
+            data: None,
+        };
+        assert_eq!(null.try_decode::<Option<f64>>().unwrap(), None);
+        assert_eq!(null.try_decode::<Option<f32>>().unwrap(), None);
+        assert!(null.try_decode::<f64>().is_err());
+        for data in [b"".as_slice(), b"invalid", b"1e999", b"NaN", b"inf", &[255]] {
+            let value = OdbcValue {
+                type_info: OdbcTypeInfo("DECIMAL".into()),
+                data: Some(data.into()),
+            };
+            assert!(value.try_decode::<f64>().is_err());
+            assert!(value.try_decode::<f32>().is_err());
+        }
+        let value = OdbcValue {
+            type_info: OdbcTypeInfo("DECIMAL".into()),
+            data: Some(b"1e40".as_slice().into()),
+        };
+        assert_eq!(value.try_decode::<f64>().unwrap(), 1e40);
+        assert!(value.try_decode::<f32>().is_err());
+        let text = OdbcValue {
+            type_info: OdbcTypeInfo("VARCHAR".into()),
+            data: Some(b"123.5".as_slice().into()),
+        };
+        assert!(text.try_decode::<f64>().is_err());
+        assert!(<f64 as Decode<Odbc>>::decode(OdbcValueRef(&text)).is_err());
+    }
+    #[test]
     fn empty_unicode_and_large_values() {
         round_trip(String::new());
         round_trip("Unicode: Ελληνικά 日本語\0end".to_owned());
@@ -149,8 +196,41 @@ scalar!(i8, "TINYINT");
 scalar!(i16, "SMALLINT");
 scalar!(i32, "INTEGER");
 scalar!(i64, "BIGINT");
-scalar!(f32, "REAL");
-scalar!(f64, "DOUBLE");
+macro_rules! float {
+    ($rust:ty, $name:literal) => {
+        impl Type<Odbc> for $rust {
+            fn type_info() -> OdbcTypeInfo {
+                OdbcTypeInfo($name.into())
+            }
+
+            fn compatible(ty: &OdbcTypeInfo) -> bool {
+                matches!(ty.0.as_ref(), $name | "DECIMAL")
+            }
+        }
+        impl Encode<'_, Odbc> for $rust {
+            fn encode_by_ref(&self, buffer: &mut Vec<OdbcValue>) -> Result<IsNull, BoxDynError> {
+                Ok(put(buffer, $name, &self.to_le_bytes()))
+            }
+        }
+        impl Decode<'_, Odbc> for $rust {
+            fn decode(value: OdbcValueRef<'_>) -> Result<Self, BoxDynError> {
+                match value.0.type_info.0.as_ref() {
+                    $name => Ok(Self::from_le_bytes(bytes(value)?.try_into()?)),
+                    "DECIMAL" => {
+                        let number = std::str::from_utf8(bytes(value)?)?.trim().parse::<Self>()?;
+                        if !number.is_finite() {
+                            return Err("ODBC decimal is out of range for a finite float".into());
+                        }
+                        Ok(number)
+                    }
+                    _ => Err("incompatible ODBC scalar representation".into()),
+                }
+            }
+        }
+    };
+}
+float!(f32, "REAL");
+float!(f64, "DOUBLE");
 impl Type<Odbc> for bool {
     fn type_info() -> OdbcTypeInfo {
         OdbcTypeInfo("BIT".into())

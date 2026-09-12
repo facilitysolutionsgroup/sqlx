@@ -6,6 +6,62 @@ use sqlx_core::{
 use sqlx_odbc::OdbcConnectOptions;
 
 #[tokio::test]
+#[ignore = "requires batch-capable ODBC_BATCH_CONNECTION_STRING"]
+async fn multiple_result_sets_and_reuse() {
+    use futures_util::TryStreamExt;
+    use sqlx_core::Either;
+    let connection_string = std::env::var("ODBC_BATCH_CONNECTION_STRING").unwrap();
+    for buffered in [false, true] {
+        let mut connection = OdbcConnectOptions::new(connection_string.clone())
+            .buffered(buffered)
+            .statement_cache_capacity(1)
+            .connect()
+            .await
+            .unwrap();
+        for persistent in [true, true, false] {
+            let mut stream = (&mut connection).fetch_many(
+                sqlx_core::query::query::<sqlx_odbc::Odbc>(
+                    "SELECT CAST(11 AS INTEGER) AS first_value; SELECT CAST(22 AS INTEGER) AS second_value",
+                )
+                .persistent(persistent),
+            );
+            let mut values = Vec::new();
+            let mut completions = 0;
+            while let Some(result) = stream.try_next().await.unwrap() {
+                match result {
+                    Either::Left(_) => completions += 1,
+                    Either::Right(row) => {
+                        let name = if values.is_empty() {
+                            "first_value"
+                        } else {
+                            "second_value"
+                        };
+                        values.push(row.try_get::<i32, _>(name).unwrap());
+                    }
+                }
+            }
+            drop(stream);
+            assert_eq!(values, [11, 22]);
+            assert_eq!(completions, 2);
+            assert_eq!(connection.cached_statements_size(), usize::from(persistent));
+        }
+        let mut stream = sqlx_core::query::query::<sqlx_odbc::Odbc>(
+            "SELECT CAST(11 AS INTEGER); SELECT CAST(22 AS INTEGER)",
+        )
+        .fetch(&mut connection);
+        let retained = stream.try_next().await.unwrap().unwrap();
+        drop(stream);
+        let rows = (&mut connection)
+            .fetch_all("SELECT CAST(33 AS INTEGER)")
+            .await
+            .unwrap();
+        assert_eq!(rows[0].try_get::<i32, _>(0).unwrap(), 33);
+        assert_eq!(retained.try_get::<i32, _>(0).unwrap(), 11);
+        connection.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 #[ignore = "manual cleanup of this development session's failed scratch tests"]
 async fn cleanup_failed_scratch_tests() {
     use sqlx_core::sql_str::AssertSqlSafe;
@@ -351,6 +407,16 @@ fn openedge_buffered_type_parity() {
             assert_eq!(rows[0].try_get::<f64, _>(2).unwrap(), 1.25);
             assert_eq!(rows[0].try_get::<String, _>(3).unwrap(), "hello");
             assert_eq!(rows[0].try_get::<Option<String>, _>(4).unwrap(), None);
+            let rows = sqlx_core::query::query::<sqlx_odbc::Odbc>("SELECT TOP 1 CAST(-123.50 AS NUMERIC(17,2)), CAST(123456789.25 AS DECIMAL(50,2)), CAST(NULL AS DECIMAL(17,2)) FROM SYSPROGRESS.SYSTABLES")
+                .fetch_all(&mut connection).await.unwrap();
+            assert_eq!(rows[0].try_get::<f64, _>(0).unwrap(), -123.5);
+            assert_eq!(
+                rows[0].try_get_unchecked::<f64, _>(1).unwrap(),
+                123456789.25
+            );
+            assert_eq!(rows[0].try_get::<f32, _>(0).unwrap(), -123.5);
+            assert_eq!(rows[0].try_get::<Option<f64>, _>(2).unwrap(), None);
+            assert!(rows[0].try_get::<f64, _>(2).is_err());
             #[cfg(all(feature = "chrono", feature = "rust_decimal"))]
             {
                 let rows = sqlx_core::query::query::<sqlx_odbc::Odbc>("SELECT TOP 1 CAST('2024-02-29' AS DATE), CAST('12:34:56' AS TIME), CAST('2024-02-29 12:34:56.123' AS TIMESTAMP), CAST(123.4500 AS DECIMAL(10,4)) FROM SYSPROGRESS.SYSTABLES")
@@ -380,6 +446,36 @@ fn openedge_buffered_type_parity() {
                     rows[0].try_get::<rust_decimal::Decimal, _>(3).unwrap(),
                     rust_decimal::Decimal::new(1234500, 4)
                 );
+            }
+            connection.close().await.unwrap();
+        }
+    });
+}
+
+#[test]
+#[ignore = "requires a wyatt OpenEdge ODBC_TEST_CONNECTION_STRING with PUB.glsb"]
+fn openedge_gl_budget_numeric_decoding() {
+    let connection_string = std::env::var("ODBC_TEST_CONNECTION_STRING").unwrap();
+    futures_executor::block_on(async {
+        for buffered in [false, true] {
+            let mut connection = OdbcConnectOptions::new(connection_string.clone())
+                .buffered(buffered)
+                .connect()
+                .await
+                .unwrap();
+            let rows = sqlx_core::query::query::<sqlx_odbc::Odbc>("SELECT TOP 500 yr, gldivno, gldeptno, glacctno, glsubno, annbud, peramt[1], peramt[2], peramt[3], peramt[4], peramt[5], peramt[6], peramt[7], peramt[8], peramt[9], peramt[10], peramt[11], peramt[12] FROM PUB.glsb")
+                .fetch_all(&mut connection).await.unwrap();
+            assert!(!rows.is_empty());
+            for row in rows {
+                for index in 0..5 {
+                    row.try_get::<i32, _>(index).unwrap();
+                }
+                for index in 5..18 {
+                    assert_eq!(
+                        row.try_get::<f64, _>(index).unwrap(),
+                        row.try_get_unchecked::<f64, _>(index).unwrap()
+                    );
+                }
             }
             connection.close().await.unwrap();
         }
