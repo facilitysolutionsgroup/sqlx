@@ -225,7 +225,9 @@ async fn do_run(opt: Opt) -> anyhow::Result<()> {
             config,
         } => {
             let config = config.load_config().await?;
-            connect_opts.populate_db_url(&config)?;
+            if !workspace {
+                connect_opts.populate_db_url(&config)?;
+            }
             prepare::run(&config, check, all, workspace, connect_opts, args).await?
         }
 

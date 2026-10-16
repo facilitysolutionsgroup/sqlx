@@ -25,6 +25,13 @@ pub struct PrepareCtx<'a> {
 impl PrepareCtx<'_> {
     /// Path to the directory where cached queries should be placed.
     fn prepare_dir(&self) -> anyhow::Result<PathBuf> {
+        if let Some(dir) = &self.config.common.offline_dir {
+            return Ok(if dir.is_absolute() {
+                dir.clone()
+            } else {
+                self.metadata.workspace_root().join(dir)
+            });
+        }
         if self.workspace {
             Ok(self.metadata.workspace_root().join(".sqlx"))
         } else {
@@ -60,11 +67,110 @@ hint: This command only works in the manifest directory of a Cargo package or wo
         connect_opts,
     };
 
-    if check {
+    if workspace {
+        prepare_workspace(&ctx, check).await
+    } else if check {
         prepare_check(&ctx).await
     } else {
         prepare(&ctx).await
     }
+}
+
+async fn prepare_workspace(ctx: &PrepareCtx<'_>, check: bool) -> anyhow::Result<()> {
+    let groups = workspace_cache_groups(&ctx.metadata, &ctx.cargo_args)?;
+    if ctx.connect_opts.database_url.is_some() && groups.len() > 1 {
+        bail!("`--database-url` cannot select multiple workspace databases; set each crate's database URL variable instead");
+    }
+    for group in groups {
+        let mut connect_opts = ConnectOpts {
+            no_dotenv: crate::opt::NoDotenvOpt {
+                no_dotenv: ctx.connect_opts.no_dotenv.no_dotenv,
+            },
+            database_url: ctx.connect_opts.database_url.clone(),
+            connect_timeout: ctx.connect_opts.connect_timeout,
+            #[cfg(feature = "_sqlite")]
+            sqlite_create_db_wal: ctx.connect_opts.sqlite_create_db_wal,
+        };
+        connect_opts.populate_db_url(&group.config)?;
+        let package_ctx = PrepareCtx {
+            config: &group.config,
+            workspace: true,
+            all: ctx.all,
+            cargo: ctx.cargo.clone(),
+            cargo_args: group
+                .packages
+                .iter()
+                .flat_map(|name| ["-p".to_owned(), name.clone()])
+                .collect(),
+            metadata: Metadata::from_current_directory(&ctx.cargo)?,
+            connect_opts,
+        };
+        if check {
+            prepare_check(&package_ctx).await?;
+        } else {
+            prepare(&package_ctx).await?;
+        }
+    }
+    Ok(())
+}
+
+struct WorkspaceGroup {
+    config: Config,
+    cache: PathBuf,
+    packages: Vec<String>,
+}
+
+fn workspace_cache_groups(
+    metadata: &Metadata,
+    cargo_args: &[String],
+) -> anyhow::Result<Vec<WorkspaceGroup>> {
+    if !cargo_args.is_empty() {
+        bail!("workspace preparation does not accept Cargo arguments");
+    }
+    let mut groups: Vec<WorkspaceGroup> = Vec::new();
+    for member in metadata.workspace_members() {
+        let package = metadata
+            .package(member)
+            .context("workspace package is missing")?;
+        let manifest_dir = package
+            .src_paths()
+            .first()
+            .and_then(|path| path.parent())
+            .and_then(Path::parent)
+            .context("workspace package has no source directory")?;
+        let path = manifest_dir.join("sqlx.toml");
+        if path.exists() {
+            let config = Config::try_from_path(path)?;
+            let cache = config
+                .common
+                .offline_dir
+                .as_ref()
+                .map(|dir| {
+                    if dir.is_absolute() {
+                        dir.clone()
+                    } else {
+                        metadata.workspace_root().join(dir)
+                    }
+                })
+                .unwrap_or_else(|| manifest_dir.join(".sqlx"));
+            if let Some(group) = groups.iter_mut().find(|group| group.cache == cache) {
+                if group.config.common.database_url_var() != config.common.database_url_var() {
+                    bail!("packages sharing a query cache must use the same database URL variable");
+                }
+                group.packages.push(package.name().to_owned());
+            } else {
+                groups.push(WorkspaceGroup {
+                    config,
+                    cache,
+                    packages: vec![package.name().to_owned()],
+                });
+            }
+        }
+    }
+    if groups.is_empty() {
+        bail!("no workspace packages with sqlx.toml found");
+    }
+    Ok(groups)
 }
 
 fn cargo_command(cargo: Option<OsString>) -> anyhow::Result<OsString> {
@@ -75,7 +181,12 @@ fn cargo_command(cargo: Option<OsString>) -> anyhow::Result<OsString> {
 }
 
 async fn prepare(ctx: &PrepareCtx<'_>) -> anyhow::Result<()> {
-    if ctx.connect_opts.database_url.is_some() {
+    if ctx
+        .connect_opts
+        .database_url
+        .as_deref()
+        .is_some_and(needs_preflight)
+    {
         check_backend(ctx.config, &ctx.connect_opts).await?;
     }
 
@@ -88,7 +199,12 @@ async fn prepare(ctx: &PrepareCtx<'_>) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if ctx.workspace {
+    if ctx.config.common.offline_dir.is_some() {
+        println!(
+            "query data written to {}; please check this into version control",
+            ctx.prepare_dir()?.display()
+        );
+    } else if ctx.workspace {
         println!(
             "query data written to .sqlx in the workspace root; \
              please check this into version control"
@@ -103,7 +219,12 @@ async fn prepare(ctx: &PrepareCtx<'_>) -> anyhow::Result<()> {
 }
 
 async fn prepare_check(ctx: &PrepareCtx<'_>) -> anyhow::Result<()> {
-    if ctx.connect_opts.database_url.is_some() {
+    if ctx
+        .connect_opts
+        .database_url
+        .as_deref()
+        .is_some_and(needs_preflight)
+    {
         check_backend(ctx.config, &ctx.connect_opts).await?;
     }
 
@@ -191,7 +312,12 @@ fn run_prepare_step(ctx: &PrepareCtx, cache_dir: &Path) -> anyhow::Result<()> {
             .env("SQLX_OFFLINE_DIR", cache_dir);
 
         if let Some(database_url) = &ctx.connect_opts.database_url {
-            check_command.env("DATABASE_URL", database_url);
+            check_command.env(ctx.config.common.database_url_var(), database_url);
+        }
+        if ctx.config.common.offline_dir.is_some()
+            && ctx.config.common.database_url_var() != "DATABASE_URL"
+        {
+            check_command.env_remove("DATABASE_URL");
         }
 
         // `cargo check` recompiles on changed rust flags which can be set either via the env var
@@ -368,6 +494,10 @@ fn load_json_file(path: impl AsRef<Path>) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&file_bytes)?)
 }
 
+fn needs_preflight(url: &str) -> bool {
+    !url.starts_with("odbc:")
+}
+
 async fn check_backend(config: &Config, opts: &ConnectOpts) -> anyhow::Result<()> {
     crate::connect(config, opts).await?.close().await?;
     Ok(())
@@ -377,6 +507,49 @@ async fn check_backend(config: &Config, opts: &ConnectOpts) -> anyhow::Result<()
 mod tests {
     use super::*;
     use std::assert_eq;
+
+    #[test]
+    fn workspace_prepare_groups_crates_by_cache() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let root = root.path();
+        std::fs::create_dir_all(root.join("b_in_workspace_lib"))?;
+        std::fs::create_dir_all(root.join("c_in_workspace_bin"))?;
+        let config =
+            "[common]\ndatabase-url-var = 'FIRST_DATABASE_URL'\noffline-dir = 'cache/first'\n";
+        std::fs::write(root.join("b_in_workspace_lib/sqlx.toml"), config)?;
+        std::fs::write(root.join("c_in_workspace_bin/sqlx.toml"), config)?;
+        let sample_metadata = std::fs::read_to_string("tests/assets/sample_metadata.json")?;
+        let sample_metadata =
+            sample_metadata.replace("/home/user/problematic/workspace", &root.to_string_lossy());
+        let metadata: Metadata = sample_metadata.parse()?;
+        let groups = workspace_cache_groups(&metadata, &[])?;
+        assert!(groups.iter().any(|group| group
+            .packages
+            .contains(&"b_in_workspace_lib".to_owned())
+            && group.packages.contains(&"c_in_workspace_bin".to_owned())));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_prepare_rejects_extra_cargo_arguments() -> anyhow::Result<()> {
+        let sample_metadata = std::fs::read_to_string("tests/assets/sample_metadata.json")?;
+        let metadata: Metadata = sample_metadata.parse()?;
+        let error = workspace_cache_groups(&metadata, &["--all-features".to_owned()])
+            .err()
+            .context("workspace arguments must be rejected")?;
+        assert_eq!(
+            error.to_string(),
+            "workspace preparation does not accept Cargo arguments"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn odbc_prepare_skips_any_connection_preflight() {
+        assert!(!needs_preflight("odbc://?connection_string=DSN%3DExample"));
+        assert!(!needs_preflight("odbc:DSN=Example"));
+        assert!(needs_preflight("postgres://localhost/db"));
+    }
 
     #[test]
     fn missing_cargo_environment_explains_prepare_invocation() {
