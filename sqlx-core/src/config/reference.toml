@@ -15,6 +15,8 @@
 # If not specified, defaults to `DATABASE_URL`
 database-url-var = "FOO_DATABASE_URL"
 
+offline-dir = "sqlx/foo"
+
 ###############################################################################################
 
 # Configuration of SQLx database drivers (**applies to macros and sqlx-cli only**)
