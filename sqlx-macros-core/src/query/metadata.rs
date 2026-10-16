@@ -29,6 +29,14 @@ impl Metadata {
         })
     }
 
+    pub fn offline_dir(&self, env: &MacrosEnv) -> Option<PathBuf> {
+        configured_offline_dir(
+            &self.workspace_root(),
+            self.config.common.offline_dir.as_deref(),
+            env.offline_dir.as_deref(),
+        )
+    }
+
     pub fn workspace_root(&self) -> PathBuf {
         let mut root = self.workspace_root.lock().unwrap();
         if root.is_none() {
@@ -90,6 +98,22 @@ pub fn try_for_crate() -> crate::Result<Arc<Metadata>> {
             workspace_root: Default::default(),
         }))
     })
+}
+
+fn configured_offline_dir(
+    workspace_root: &Path,
+    configured: Option<&Path>,
+    environment: Option<&Path>,
+) -> Option<PathBuf> {
+    configured
+        .map(|dir| {
+            if dir.is_absolute() {
+                dir.to_path_buf()
+            } else {
+                workspace_root.join(dir)
+            }
+        })
+        .or_else(|| environment.map(Path::to_path_buf))
 }
 
 fn load_env(
@@ -178,4 +202,28 @@ fn load_env(
 /// Returns `true` if `val` is `"true"` (case-insensitive) or `"1"`.
 fn is_truthy_bool(val: &str) -> bool {
     val.eq_ignore_ascii_case("true") || val == "1"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::configured_offline_dir;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn configured_cache_overrides_process_environment() {
+        let root = Path::new("/workspace");
+        let environment = Path::new("/shared/pg");
+        assert_eq!(
+            configured_offline_dir(root, Some(Path::new("sqlx/oe")), Some(environment)),
+            Some(PathBuf::from("/workspace/sqlx/oe"))
+        );
+        assert_eq!(
+            configured_offline_dir(root, Some(Path::new("/absolute/oe")), Some(environment)),
+            Some(PathBuf::from("/absolute/oe"))
+        );
+        assert_eq!(
+            configured_offline_dir(root, None, Some(environment)),
+            Some(environment.to_path_buf())
+        );
+    }
 }

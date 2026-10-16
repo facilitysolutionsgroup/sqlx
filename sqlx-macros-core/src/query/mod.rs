@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use proc_macro2::TokenStream;
 use syn::Type;
@@ -13,7 +13,6 @@ use crate::query::data::{hash_string, DynQueryData, QueryData};
 use crate::query::input::RecordType;
 use crate::query::metadata::MacrosEnv;
 use either::Either;
-use metadata::Metadata;
 use sqlx_core::config::Config;
 use url::Url;
 
@@ -77,6 +76,7 @@ pub fn expand_input<'a>(
     let metadata = metadata::try_for_crate()?;
 
     let metadata_env = metadata.env()?;
+    let offline_dir = metadata.offline_dir(&metadata_env);
 
     let data_source = match &*metadata_env {
         MacrosEnv {
@@ -86,27 +86,17 @@ pub fn expand_input<'a>(
         }
         // Allow `DATABASE_URL=''`
         if !db_url.is_empty() => QueryDataSource::live(db_url)?,
-        MacrosEnv {
-            offline,
-            offline_dir,
-            ..
-        } => {
-            // Try load the cached query metadata file.
+        MacrosEnv { offline, .. } => {
             let filename = format!("query-{}.json", hash_string(&input.sql));
+            let data_file_path = find_cached_query(
+                &metadata.manifest_dir,
+                &metadata.workspace_root(),
+                offline_dir.as_deref(),
+                metadata.config.common.offline_dir.is_some(),
+                &filename,
+            );
 
-            // Check SQLX_OFFLINE_DIR, then local .sqlx, then workspace .sqlx.
-            let dirs = [
-                |_: &Metadata, offline_dir: Option<&Path>| offline_dir.map(PathBuf::from),
-                |meta: &Metadata, _: Option<&Path>| Some(meta.manifest_dir.join(".sqlx")),
-                |meta: &Metadata, _: Option<&Path>| Some(meta.workspace_root().join(".sqlx")),
-            ];
-
-            let Some(data_file_path) = dirs
-                .iter()
-                .filter_map(|path| path(&metadata, offline_dir.as_deref()))
-                .map(|path| path.join(&filename))
-                .find(|path| path.exists())
-            else {
+            let Some(data_file_path) = data_file_path else {
                 return Err(
                     if offline.unwrap_or(false) {
                         "`SQLX_OFFLINE=true` but there is no cached data for this query, run `cargo sqlx prepare` to update the query cache or unset `SQLX_OFFLINE`"
@@ -122,12 +112,15 @@ pub fn expand_input<'a>(
 
     for driver in drivers {
         if data_source.matches_driver(driver) {
-            return (driver.expand)(
-                &metadata.config,
-                input,
-                data_source,
-                metadata_env.offline_dir.as_deref(),
-            );
+            let save_dir = match data_source {
+                QueryDataSource::Live { .. } if crate::env_opt("SQLX_TMP")?.is_some() => {
+                    metadata_env.offline_dir.as_deref()
+                }
+                QueryDataSource::Live { .. } if metadata.config.common.offline_dir.is_some() => None,
+                QueryDataSource::Live { .. } => offline_dir.as_deref(),
+                QueryDataSource::Cached(_) => None,
+            };
+            return (driver.expand)(&metadata.config, input, data_source, save_dir);
         }
     }
 
@@ -145,6 +138,72 @@ pub fn expand_input<'a>(
                 data.db_name
             ).into())
         }
+    }
+}
+
+fn find_cached_query(
+    manifest_dir: &Path,
+    workspace_root: &Path,
+    offline_dir: Option<&Path>,
+    isolated: bool,
+    filename: &str,
+) -> Option<std::path::PathBuf> {
+    if isolated {
+        return offline_dir
+            .map(|dir| dir.join(filename))
+            .filter(|path| path.exists());
+    }
+
+    [
+        offline_dir.map(Path::to_path_buf),
+        Some(manifest_dir.join(".sqlx")),
+        Some(workspace_root.join(".sqlx")),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|dir| dir.join(filename))
+    .find(|path| path.exists())
+}
+
+#[cfg(test)]
+mod offline_cache_tests {
+    use super::find_cached_query;
+    use std::fs;
+
+    #[test]
+    fn isolated_cache_never_reads_another_backend_or_workspace_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("sqlx-cache-isolation-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        let oe = root.join("oe");
+        let pg = root.join("pg");
+        let crate_dir = root.join("crate");
+        fs::create_dir_all(&oe).unwrap();
+        fs::create_dir_all(&pg).unwrap();
+        fs::create_dir_all(crate_dir.join(".sqlx")).unwrap();
+        fs::write(pg.join("query-shared.json"), "postgres").unwrap();
+        fs::write(crate_dir.join(".sqlx/query-shared.json"), "fallback").unwrap();
+
+        assert_eq!(
+            find_cached_query(&crate_dir, &root, Some(&oe), true, "query-shared.json"),
+            None
+        );
+        fs::write(oe.join("query-shared.json"), "odbc").unwrap();
+        assert_eq!(
+            find_cached_query(&crate_dir, &root, Some(&oe), true, "query-shared.json"),
+            Some(oe.join("query-shared.json"))
+        );
+        assert_eq!(
+            find_cached_query(&crate_dir, &root, Some(&pg), true, "query-shared.json"),
+            Some(pg.join("query-shared.json"))
+        );
+        assert_eq!(
+            find_cached_query(&crate_dir, &root, None, false, "query-shared.json"),
+            Some(crate_dir.join(".sqlx/query-shared.json"))
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 }
 

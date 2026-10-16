@@ -40,6 +40,9 @@ pub struct Config {
     /// The query macros used in `foo` will use `FOO_DATABASE_URL`,
     /// and the ones used in `bar` will use `BAR_DATABASE_URL`.
     pub database_url_var: Option<String>,
+
+    /// Workspace-relative, crate-specific query cache used instead of shared cache paths.
+    pub offline_dir: Option<std::path::PathBuf>,
 }
 
 impl Config {

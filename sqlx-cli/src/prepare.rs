@@ -25,6 +25,13 @@ pub struct PrepareCtx<'a> {
 impl PrepareCtx<'_> {
     /// Path to the directory where cached queries should be placed.
     fn prepare_dir(&self) -> anyhow::Result<PathBuf> {
+        if let Some(dir) = &self.config.common.offline_dir {
+            return Ok(if dir.is_absolute() {
+                dir.clone()
+            } else {
+                self.metadata.workspace_root().join(dir)
+            });
+        }
         if self.workspace {
             Ok(self.metadata.workspace_root().join(".sqlx"))
         } else {
@@ -50,6 +57,9 @@ hint: This command only works in the manifest directory of a Cargo package or wo
     );
 
     let metadata: Metadata = Metadata::from_current_directory(&cargo)?;
+    if config.common.offline_dir.is_some() && workspace {
+        bail!("`--workspace` cannot be combined with `[common] offline-dir`; prepare each configured crate separately");
+    }
     let ctx = PrepareCtx {
         config,
         workspace,
@@ -75,7 +85,12 @@ fn cargo_command(cargo: Option<OsString>) -> anyhow::Result<OsString> {
 }
 
 async fn prepare(ctx: &PrepareCtx<'_>) -> anyhow::Result<()> {
-    if ctx.connect_opts.database_url.is_some() {
+    if ctx
+        .connect_opts
+        .database_url
+        .as_deref()
+        .is_some_and(needs_preflight)
+    {
         check_backend(ctx.config, &ctx.connect_opts).await?;
     }
 
@@ -88,7 +103,12 @@ async fn prepare(ctx: &PrepareCtx<'_>) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if ctx.workspace {
+    if ctx.config.common.offline_dir.is_some() {
+        println!(
+            "query data written to {}; please check this into version control",
+            ctx.prepare_dir()?.display()
+        );
+    } else if ctx.workspace {
         println!(
             "query data written to .sqlx in the workspace root; \
              please check this into version control"
@@ -103,7 +123,12 @@ async fn prepare(ctx: &PrepareCtx<'_>) -> anyhow::Result<()> {
 }
 
 async fn prepare_check(ctx: &PrepareCtx<'_>) -> anyhow::Result<()> {
-    if ctx.connect_opts.database_url.is_some() {
+    if ctx
+        .connect_opts
+        .database_url
+        .as_deref()
+        .is_some_and(needs_preflight)
+    {
         check_backend(ctx.config, &ctx.connect_opts).await?;
     }
 
@@ -191,7 +216,12 @@ fn run_prepare_step(ctx: &PrepareCtx, cache_dir: &Path) -> anyhow::Result<()> {
             .env("SQLX_OFFLINE_DIR", cache_dir);
 
         if let Some(database_url) = &ctx.connect_opts.database_url {
-            check_command.env("DATABASE_URL", database_url);
+            check_command.env(ctx.config.common.database_url_var(), database_url);
+        }
+        if ctx.config.common.offline_dir.is_some()
+            && ctx.config.common.database_url_var() != "DATABASE_URL"
+        {
+            check_command.env_remove("DATABASE_URL");
         }
 
         // `cargo check` recompiles on changed rust flags which can be set either via the env var
@@ -368,6 +398,10 @@ fn load_json_file(path: impl AsRef<Path>) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&file_bytes)?)
 }
 
+fn needs_preflight(url: &str) -> bool {
+    !url.starts_with("odbc:")
+}
+
 async fn check_backend(config: &Config, opts: &ConnectOpts) -> anyhow::Result<()> {
     crate::connect(config, opts).await?.close().await?;
     Ok(())
@@ -377,6 +411,13 @@ async fn check_backend(config: &Config, opts: &ConnectOpts) -> anyhow::Result<()
 mod tests {
     use super::*;
     use std::assert_eq;
+
+    #[test]
+    fn odbc_prepare_skips_any_connection_preflight() {
+        assert!(!needs_preflight("odbc://?connection_string=DSN%3DProgress"));
+        assert!(!needs_preflight("odbc:DSN=Progress"));
+        assert!(needs_preflight("postgres://localhost/db"));
+    }
 
     #[test]
     fn missing_cargo_environment_explains_prepare_invocation() {

@@ -15,6 +15,10 @@ fn reference_parses_as_config() {
 
 fn assert_common_config(config: &config::common::Config) {
     assert_eq!(config.database_url_var.as_deref(), Some("FOO_DATABASE_URL"));
+    assert_eq!(
+        config.offline_dir.as_deref(),
+        Some(std::path::Path::new("sqlx/foo"))
+    );
 }
 
 fn assert_drivers_config(config: &config::drivers::Config) {
