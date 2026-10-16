@@ -192,6 +192,10 @@ fn expand_with_data<DB: DatabaseExt>(
 where
     Describe<DB>: DescribeExt,
 {
+    if DB::NAME == "ODBC" && !matches!(data.describe.parameters(), Some(Either::Left(_))) {
+        return Err("ODBC checked queries require parameter type metadata, including in offline mode".into());
+    }
+
     // validate at the minimum that our args match the query's input parameters
     let num_parameters = match data.describe.parameters() {
         Some(Either::Left(params)) => Some(params.len()),

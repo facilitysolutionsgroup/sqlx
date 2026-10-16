@@ -35,6 +35,7 @@ sqlx-toml = ["sqlx-macros-core/sqlx-toml"]
 # database
 mysql = ["sqlx-macros-core/mysql"]
 mysql-rsa = ["sqlx-macros-core/mysql-rsa"]
+odbc = ["sqlx-macros-core/odbc"]
 postgres = ["sqlx-macros-core/postgres"]
 sqlite = ["sqlx-macros-core/sqlite"]
 sqlite-unbundled = ["sqlx-macros-core/sqlite-unbundled"]

@@ -51,6 +51,11 @@ pub use sqlx_mysql::{
     self as mysql, MySql, MySqlConnection, MySqlExecutor, MySqlPool, MySqlTransaction,
 };
 
+#[cfg(feature = "odbc")]
+pub use sqlx_odbc::{
+    self as odbc, Odbc, OdbcConnection, OdbcExecutor, OdbcPool, OdbcTransaction,
+};
+
 #[cfg(feature = "postgres")]
 #[cfg_attr(docsrs, doc(cfg(feature = "postgres")))]
 #[doc(inline)]

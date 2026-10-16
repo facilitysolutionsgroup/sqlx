@@ -1,0 +1,40 @@
+[package]
+name = "sqlx-odbc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ODBC driver for SQLx"
+
+[features]
+offline = ["dep:serde"]
+chrono = ["dep:chrono", "sqlx-core/chrono"]
+rust_decimal = ["dep:rust_decimal", "sqlx-core/rust_decimal"]
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"], optional = true }
+chrono = { workspace = true, optional = true }
+rust_decimal = { workspace = true, optional = true }
+sqlx-core = { workspace = true, features = ["offline"] }
+odbc-api = { git = "ssh://git@github.com/facilitysolutionsgroup/odbc-api.git", rev = "4d4a72479ef3ecad4d87bab69e4e2dfba0b131eb", default-features = false }
+flume = { version = "0.12.0", default-features = false, features = ["async"] }
+futures-core = "0.3.32"
+futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
+log = "0.4"
+url = "2.2.2"
+
+[dev-dependencies]
+sqlx-core = { workspace = true, features = ["_rt-tokio"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+futures-executor = "0.3.32"
+
+[lints.clippy]
+cast_possible_truncation = 'deny'
+cast_possible_wrap = 'deny'
+cast_sign_loss = 'deny'
+disallowed_methods = 'deny'
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(feature, values("time", "bigdecimal"))']
