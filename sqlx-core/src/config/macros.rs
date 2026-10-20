@@ -1,4 +1,15 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
+
+#[derive(Debug, Default)]
+#[cfg_attr(
+    feature = "sqlx-toml",
+    derive(serde::Deserialize),
+    serde(rename_all = "kebab-case", deny_unknown_fields)
+)]
+pub struct QueryProfile {
+    pub database_url_var: String,
+    pub offline_dir: PathBuf,
+}
 
 /// Configuration for the `query!()` family of macros.
 ///
@@ -14,6 +25,8 @@ pub struct Config {
     ///
     /// See [`PreferredCrates`] for details.
     pub preferred_crates: PreferredCrates,
+
+    pub profiles: BTreeMap<String, QueryProfile>,
 
     /// Specify global overrides for mapping SQL type names to Rust type names.
     ///

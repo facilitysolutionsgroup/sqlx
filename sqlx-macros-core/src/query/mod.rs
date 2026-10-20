@@ -76,23 +76,54 @@ pub fn expand_input<'a>(
     let metadata = metadata::try_for_crate()?;
 
     let metadata_env = metadata.env()?;
-    let offline_dir = metadata.offline_dir(&metadata_env);
+    let profile = input
+        .profile
+        .as_deref()
+        .map(|name| {
+            metadata
+                .config
+                .macros
+                .profiles
+                .get(name)
+                .ok_or_else(|| format!("unknown query profile {name:?}"))
+        })
+        .transpose()?;
+    let profile_url = if metadata_env.offline.unwrap_or(false) {
+        None
+    } else {
+        profile
+            .map(|profile| metadata.profile_url(&profile.database_url_var))
+            .transpose()?
+            .flatten()
+    };
+    let offline_dir = profile
+        .map(|profile| {
+            metadata::configured_offline_dir(
+                &metadata.workspace_root(),
+                Some(&profile.offline_dir),
+                None,
+            )
+        })
+        .unwrap_or_else(|| metadata.offline_dir(&metadata_env));
 
-    let data_source = match &*metadata_env {
-        MacrosEnv {
+    let data_source = match (&*metadata_env, profile_url.as_deref()) {
+        (MacrosEnv { offline: None | Some(false), .. }, Some(url)) if profile.is_some() => {
+            QueryDataSource::live(url)?
+        }
+        (MacrosEnv {
             offline: None | Some(false),
             database_url: Some(db_url),
             ..
-        }
+        }, _)
         // Allow `DATABASE_URL=''`
-        if !db_url.is_empty() => QueryDataSource::live(db_url)?,
-        MacrosEnv { offline, .. } => {
+        if profile.is_none() && !db_url.is_empty() => QueryDataSource::live(db_url)?,
+        (MacrosEnv { offline, .. }, _) => {
             let filename = format!("query-{}.json", hash_string(&input.sql));
             let data_file_path = find_cached_query(
                 &metadata.manifest_dir,
                 &metadata.workspace_root(),
                 offline_dir.as_deref(),
-                metadata.config.common.offline_dir.is_some(),
+                profile.is_some() || metadata.config.common.offline_dir.is_some(),
                 &filename,
             );
 
@@ -106,17 +137,24 @@ pub fn expand_input<'a>(
                 );
             };
 
-            QueryDataSource::Cached(DynQueryData::from_data_file(&data_file_path, &input.sql)?)
+            let cached = DynQueryData::from_data_file(&data_file_path, &input.sql)?;
+            if cached.profile != input.profile {
+                return Err("query metadata was prepared under a different profile".into());
+            }
+            QueryDataSource::Cached(cached)
         }
     };
 
     for driver in drivers {
         if data_source.matches_driver(driver) {
             let save_dir = match data_source {
+                QueryDataSource::Live { .. } if profile.is_some() => offline_dir.as_deref(),
                 QueryDataSource::Live { .. } if crate::env_opt("SQLX_TMP")?.is_some() => {
                     metadata_env.offline_dir.as_deref()
                 }
-                QueryDataSource::Live { .. } if metadata.config.common.offline_dir.is_some() => None,
+                QueryDataSource::Live { .. } if metadata.config.common.offline_dir.is_some() => {
+                    None
+                }
                 QueryDataSource::Live { .. } => offline_dir.as_deref(),
                 QueryDataSource::Cached(_) => None,
             };
@@ -221,7 +259,9 @@ where
         QueryDataSource::Cached(dyn_data) => (QueryData::from_dyn_data(dyn_data)?, None),
         QueryDataSource::Live { database_url, .. } => {
             let describe = DB::describe_blocking(&input.sql, database_url, &config.drivers)?;
-            (QueryData::from_describe(&input.sql, describe), offline_dir)
+            let mut data = QueryData::from_describe(&input.sql, describe);
+            data.profile = input.profile.clone();
+            (data, offline_dir)
         }
     };
 
@@ -252,7 +292,13 @@ where
     Describe<DB>: DescribeExt,
 {
     if DB::NAME == "ODBC" && !matches!(data.describe.parameters(), Some(Either::Left(_))) {
-        return Err("ODBC checked queries require parameter type metadata, including in offline mode".into());
+        return Err(
+            "ODBC checked queries require parameter type metadata, including in offline mode"
+                .into(),
+        );
+    }
+    if input.profile != data.profile {
+        return Err("query metadata was prepared under a different profile".into());
     }
 
     // validate at the minimum that our args match the query's input parameters

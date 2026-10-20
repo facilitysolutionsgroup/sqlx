@@ -54,6 +54,12 @@ fn assert_macros_config(config: &config::macros::Config) {
 
     assert_eq!(config.preferred_crates.date_time, DateTimeCrate::Chrono);
     assert_eq!(config.preferred_crates.numeric, NumericCrate::RustDecimal);
+    let reporting = config.profiles.get("reporting").unwrap();
+    assert_eq!(reporting.database_url_var, "REPORTING_DATABASE_URL");
+    assert_eq!(
+        reporting.offline_dir,
+        std::path::Path::new("sqlx/reporting")
+    );
 
     // Type overrides
     // Don't need to cover everything, just some important canaries.

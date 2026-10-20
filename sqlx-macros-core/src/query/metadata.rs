@@ -29,6 +29,16 @@ impl Metadata {
         })
     }
 
+    pub fn profile_url(&self, variable: &str) -> crate::Result<Option<String>> {
+        let workspace_root = self.workspace_root();
+        let dirs = self
+            .manifest_dir
+            .ancestors()
+            .take_while(|dir| dir.starts_with(&workspace_root))
+            .collect::<Vec<_>>();
+        lookup_profile_url(variable, &dirs)
+    }
+
     pub fn offline_dir(&self, env: &MacrosEnv) -> Option<PathBuf> {
         configured_offline_dir(
             &self.workspace_root(),
@@ -100,7 +110,26 @@ pub fn try_for_crate() -> crate::Result<Arc<Metadata>> {
     })
 }
 
-fn configured_offline_dir(
+fn lookup_profile_url(variable: &str, dirs: &[&Path]) -> crate::Result<Option<String>> {
+    let mut value = None;
+    for dir in dirs.iter().rev() {
+        match dotenvy::from_path_iter(dir.join(".env")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let (name, url) = entry?;
+                    if name == variable {
+                        value = Some(url);
+                    }
+                }
+            }
+            Err(dotenvy::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(crate::env_opt(variable)?.or(value))
+}
+
+pub(super) fn configured_offline_dir(
     workspace_root: &Path,
     configured: Option<&Path>,
     environment: Option<&Path>,
@@ -206,8 +235,27 @@ fn is_truthy_bool(val: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::configured_offline_dir;
-    use std::path::{Path, PathBuf};
+    use super::{configured_offline_dir, lookup_profile_url};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    #[test]
+    fn profile_url_reads_crate_dotenv() {
+        let root = std::env::temp_dir().join(format!("sqlx-profile-{}", std::process::id()));
+        let crate_dir = root.join("crate");
+        fs::create_dir_all(&crate_dir).unwrap();
+        fs::write(root.join(".env"), "SQLX_PROFILE_TEST_URL=root\n").unwrap();
+        fs::write(crate_dir.join(".env"), "SQLX_PROFILE_TEST_URL=crate\n").unwrap();
+        let result = lookup_profile_url(
+            "SQLX_PROFILE_TEST_URL",
+            &[crate_dir.as_path(), root.as_path()],
+        )
+        .unwrap();
+        assert_eq!(result.as_deref(), Some("crate"));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn configured_cache_overrides_process_environment() {

@@ -23,6 +23,8 @@ pub struct QueryData<DB: Database> {
     pub(super) query: String,
     pub(super) describe: Describe<DB>,
     pub(super) hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) profile: Option<String>,
 }
 
 impl<DB: Database> QueryData<DB> {
@@ -32,6 +34,7 @@ impl<DB: Database> QueryData<DB> {
             query: query.into(),
             describe,
             hash: hash_string(query),
+            profile: None,
         }
     }
 }
@@ -75,6 +78,8 @@ pub struct DynQueryData {
     pub query: String,
     pub describe: serde_json::Value,
     pub hash: String,
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 impl DynQueryData {
@@ -125,6 +130,7 @@ where
                 query: dyn_data.query,
                 describe,
                 hash: dyn_data.hash,
+                profile: dyn_data.profile,
             })
         } else {
             Err(format!(

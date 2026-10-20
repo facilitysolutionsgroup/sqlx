@@ -18,6 +18,8 @@ pub struct QueryMacroInput {
 
     pub(super) checked: bool,
 
+    pub(super) profile: Option<String>,
+
     pub(super) file_path: Option<String>,
 }
 
@@ -39,6 +41,7 @@ impl Parse for QueryMacroInput {
         let mut args: Option<Vec<Expr>> = None;
         let mut record_type = RecordType::Generated;
         let mut checked = true;
+        let mut profile = None;
 
         let mut expect_comma = false;
 
@@ -83,6 +86,11 @@ impl Parse for QueryMacroInput {
             } else if key == "checked" {
                 let lit_bool = input.parse::<LitBool>()?;
                 checked = lit_bool.value;
+            } else if key == "profile" {
+                let name = input.parse::<LitStr>()?.value();
+                if name.is_empty() || profile.replace(name).is_some() {
+                    return Err(input.error("query profile must have a nonempty, unique name"));
+                }
             } else {
                 let message = format!("unexpected input key: {key}");
                 return Err(syn::Error::new_spanned(key, message));
@@ -104,6 +112,7 @@ impl Parse for QueryMacroInput {
             record_type,
             arg_exprs,
             checked,
+            profile,
             file_path,
         })
     }

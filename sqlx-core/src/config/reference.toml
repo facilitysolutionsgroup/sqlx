@@ -64,6 +64,10 @@ bar = true
 # Configuration for the `query!()` family of macros.
 [macros]
 
+[macros.profiles.reporting]
+database-url-var = "REPORTING_DATABASE_URL"
+offline-dir = "sqlx/reporting"
+
 [macros.preferred-crates]
 # Force the macros to use the `chrono` crate for date/time types, even if `time` is enabled.
 #
