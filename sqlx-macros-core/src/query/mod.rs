@@ -9,7 +9,7 @@ use sqlx_core::database::Database;
 use sqlx_core::{column::Column, describe::Describe, type_info::TypeInfo};
 
 use crate::database::DatabaseExt;
-use crate::query::data::{hash_string, DynQueryData, QueryData};
+use crate::query::data::{hash_profiled_query, DynQueryData, QueryData};
 use crate::query::input::RecordType;
 use crate::query::metadata::MacrosEnv;
 use either::Either;
@@ -92,7 +92,12 @@ pub fn expand_input<'a>(
         None
     } else {
         profile
-            .map(|profile| metadata.profile_url(&profile.database_url_var))
+            .map(|profile| {
+                metadata
+                    .profile_url(&profile.database_url_var)?
+                    .map(|url| suffix_url_query_value(&url, profile.url_suffix.as_deref()))
+                    .transpose()
+            })
             .transpose()?
             .flatten()
     };
@@ -118,7 +123,10 @@ pub fn expand_input<'a>(
         // Allow `DATABASE_URL=''`
         if profile.is_none() && !db_url.is_empty() => QueryDataSource::live(db_url)?,
         (MacrosEnv { offline, .. }, _) => {
-            let filename = format!("query-{}.json", hash_string(&input.sql));
+            let filename = format!(
+                "query-{}.json",
+                hash_profiled_query(&input.sql, input.profile.as_deref())
+            );
             let data_file_path = find_cached_query(
                 &metadata.manifest_dir,
                 &metadata.workspace_root(),
@@ -137,11 +145,11 @@ pub fn expand_input<'a>(
                 );
             };
 
-            let cached = DynQueryData::from_data_file(&data_file_path, &input.sql)?;
-            if cached.profile != input.profile {
-                return Err("query metadata was prepared under a different profile".into());
-            }
-            QueryDataSource::Cached(cached)
+            QueryDataSource::Cached(DynQueryData::from_data_file(
+                &data_file_path,
+                &input.sql,
+                input.profile.as_deref(),
+            )?)
         }
     };
 
@@ -179,6 +187,33 @@ pub fn expand_input<'a>(
     }
 }
 
+fn suffix_url_query_value(url: &str, suffix: Option<&str>) -> crate::Result<String> {
+    let Some(suffix) = suffix else {
+        return Ok(url.to_owned());
+    };
+    let mut parsed = Url::parse(url)?;
+    let mut matches = 0;
+    let pairs = parsed
+        .query_pairs()
+        .map(|(key, value)| {
+            let value = if key == "connection_string" {
+                matches += 1;
+                format!("{value}{suffix}")
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect::<Vec<_>>();
+    if matches != 1 {
+        return Err(
+            "profile URL suffix requires exactly one connection_string query parameter".into(),
+        );
+    }
+    parsed.query_pairs_mut().clear().extend_pairs(pairs);
+    Ok(parsed.into())
+}
+
 fn find_cached_query(
     manifest_dir: &Path,
     workspace_root: &Path,
@@ -205,8 +240,92 @@ fn find_cached_query(
 
 #[cfg(test)]
 mod offline_cache_tests {
-    use super::find_cached_query;
+    use super::{find_cached_query, hash_profiled_query, suffix_url_query_value};
     use std::fs;
+
+    #[test]
+    fn cached_query_rejects_wrong_role() {
+        let root = std::env::temp_dir().join(format!("sqlx-profile-cache-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let query = "SELECT 1";
+        let hash = hash_profiled_query(query, Some("write"));
+        let path = root.join(format!("query-{hash}.json"));
+        fs::write(
+            &path,
+            serde_json::json!({
+                "db_name": "ODBC", "query": query, "describe": {}, "hash": hash, "profile": "write"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(super::DynQueryData::from_data_file(&path, query, None).is_err());
+        assert!(super::DynQueryData::from_data_file(&path, query, Some("read")).is_err());
+        assert!(super::DynQueryData::from_data_file(&path, query, Some("write")).is_ok());
+        fs::write(
+            &path,
+            serde_json::json!({
+                "db_name": "ODBC", "query": query, "describe": {},
+                "hash": hash_profiled_query(query, None), "profile": "write"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(super::DynQueryData::from_data_file(&path, query, Some("write")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profiled_cache_keys_do_not_collide() {
+        let query = "SELECT 1";
+        assert_ne!(
+            hash_profiled_query(query, None),
+            hash_profiled_query(query, Some("write"))
+        );
+        assert_ne!(
+            hash_profiled_query(query, Some("read")),
+            hash_profiled_query(query, Some("write"))
+        );
+        assert_eq!(
+            hash_profiled_query(query, None),
+            super::data::hash_string(query)
+        );
+    }
+
+    #[test]
+    fn profile_suffix_encodes_decoded_query_value() {
+        let url = suffix_url_query_value(
+            "odbc://?connection_string=DSN%3Dtest%3BPWD%3D%7Ba%3Bb%7D&other=ok",
+            Some(";ROLE=write"),
+        )
+        .unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        assert_eq!(
+            parsed
+                .query_pairs()
+                .find(|(key, _)| key == "connection_string")
+                .unwrap()
+                .1,
+            "DSN=test;PWD={a;b};ROLE=write"
+        );
+        assert_eq!(
+            parsed
+                .query_pairs()
+                .find(|(key, _)| key == "other")
+                .unwrap()
+                .1,
+            "ok"
+        );
+        assert!(suffix_url_query_value("odbc://?other=x", Some(";ROLE=write")).is_err());
+        assert!(suffix_url_query_value(
+            "odbc://?connection_string=x&connection_string=y",
+            Some(";ROLE=write")
+        )
+        .is_err());
+        assert_eq!(
+            suffix_url_query_value("odbc://?connection_string=x", None).unwrap(),
+            "odbc://?connection_string=x"
+        );
+    }
 
     #[test]
     fn isolated_cache_never_reads_another_backend_or_workspace_fallback() {
@@ -261,6 +380,7 @@ where
             let describe = DB::describe_blocking(&input.sql, database_url, &config.drivers)?;
             let mut data = QueryData::from_describe(&input.sql, describe);
             data.profile = input.profile.clone();
+            data.hash = hash_profiled_query(&input.sql, input.profile.as_deref());
             (data, offline_dir)
         }
     };
@@ -297,8 +417,10 @@ where
                 .into(),
         );
     }
-    if input.profile != data.profile {
-        return Err("query metadata was prepared under a different profile".into());
+    if input.profile != data.profile
+        || data.hash != hash_profiled_query(&input.sql, input.profile.as_deref())
+    {
+        return Err("query metadata does not match its query profile".into());
     }
 
     // validate at the minimum that our args match the query's input parameters

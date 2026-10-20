@@ -9,6 +9,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 pub struct QueryProfile {
     pub database_url_var: String,
     pub offline_dir: PathBuf,
+    #[cfg_attr(feature = "sqlx-toml", serde(default))]
+    pub url_suffix: Option<String>,
 }
 
 /// Configuration for the `query!()` family of macros.

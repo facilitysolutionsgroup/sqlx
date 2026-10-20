@@ -60,6 +60,7 @@ fn assert_macros_config(config: &config::macros::Config) {
         reporting.offline_dir,
         std::path::Path::new("sqlx/reporting")
     );
+    assert_eq!(reporting.url_suffix.as_deref(), Some(";ROLE=reporting"));
 
     // Type overrides
     // Don't need to cover everything, just some important canaries.

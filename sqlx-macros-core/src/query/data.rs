@@ -85,7 +85,7 @@ pub struct DynQueryData {
 impl DynQueryData {
     /// Loads a query given the path to its "query-<hash>.json" file. Subsequent calls for the same
     /// path are retrieved from an in-memory cache.
-    pub fn from_data_file(path: &Path, query: &str) -> crate::Result<Self> {
+    pub fn from_data_file(path: &Path, query: &str, profile: Option<&str>) -> crate::Result<Self> {
         let cache = OFFLINE_DATA_CACHE
             .lock()
             // Just reset the cache on error
@@ -98,7 +98,7 @@ impl DynQueryData {
             .or_insert_with(|| Arc::new(MtimeCache::new()))
             .clone();
 
-        cache.get_or_try_init(|builder| {
+        let dyn_data = cache.get_or_try_init(|builder| -> crate::Result<DynQueryData> {
             builder.add_path(path.into());
 
             let offline_data_contents = fs::read_to_string(path).map_err(|e| {
@@ -111,7 +111,13 @@ impl DynQueryData {
             }
 
             Ok(dyn_data)
-        })
+        })?;
+        if dyn_data.profile.as_deref() != profile
+            || dyn_data.hash != hash_profiled_query(query, profile)
+        {
+            return Err("query metadata does not match its query profile".into());
+        }
+        Ok(dyn_data)
     }
 }
 
@@ -217,4 +223,19 @@ pub(super) fn hash_string(query: &str) -> String {
     use sha2::{Digest, Sha256};
 
     hex::encode(Sha256::digest(query.as_bytes()))
+}
+
+pub(super) fn hash_profiled_query(query: &str, profile: Option<&str>) -> String {
+    match profile {
+        None => hash_string(query),
+        Some(profile) => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(b"sqlx-query-profile\0");
+            hasher.update(profile.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(query.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+    }
 }
