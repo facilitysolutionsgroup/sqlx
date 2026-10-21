@@ -57,6 +57,14 @@ hint: This command only works in the manifest directory of a Cargo package or wo
     );
 
     let metadata: Metadata = Metadata::from_current_directory(&cargo)?;
+    let workspace = workspace
+        || (metadata.current_package().is_none()
+            && !Path::new("sqlx.toml").exists()
+            && cargo_args.is_empty());
+    let mut connect_opts = connect_opts;
+    if !workspace {
+        connect_opts.populate_db_url(config)?;
+    }
     let ctx = PrepareCtx {
         config,
         workspace,
