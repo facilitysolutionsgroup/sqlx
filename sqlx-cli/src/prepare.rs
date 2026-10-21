@@ -85,7 +85,7 @@ hint: This command only works in the manifest directory of a Cargo package or wo
 }
 
 async fn prepare_workspace(ctx: &PrepareCtx<'_>, check: bool) -> anyhow::Result<()> {
-    let groups = workspace_cache_groups(&ctx.metadata, &ctx.cargo_args)?;
+    let groups = workspace_cache_groups(&ctx.metadata)?;
     if ctx.connect_opts.database_url.is_some() && groups.len() > 1 {
         bail!("`--database-url` cannot select multiple workspace databases; set each crate's database URL variable instead");
     }
@@ -105,11 +105,7 @@ async fn prepare_workspace(ctx: &PrepareCtx<'_>, check: bool) -> anyhow::Result<
             workspace: true,
             all: ctx.all,
             cargo: ctx.cargo.clone(),
-            cargo_args: group
-                .packages
-                .iter()
-                .flat_map(|name| ["-p".to_owned(), name.clone()])
-                .collect(),
+            cargo_args: workspace_cargo_args(&group.packages, &ctx.cargo_args),
             metadata: Metadata::from_current_directory(&ctx.cargo)?,
             connect_opts,
         };
@@ -128,13 +124,15 @@ struct WorkspaceGroup {
     packages: Vec<String>,
 }
 
-fn workspace_cache_groups(
-    metadata: &Metadata,
-    cargo_args: &[String],
-) -> anyhow::Result<Vec<WorkspaceGroup>> {
-    if !cargo_args.is_empty() {
-        bail!("workspace preparation does not accept Cargo arguments");
-    }
+fn workspace_cargo_args(packages: &[String], cargo_args: &[String]) -> Vec<String> {
+    packages
+        .iter()
+        .flat_map(|name| ["-p".to_owned(), name.clone()])
+        .chain(cargo_args.iter().cloned())
+        .collect()
+}
+
+fn workspace_cache_groups(metadata: &Metadata) -> anyhow::Result<Vec<WorkspaceGroup>> {
     let mut groups: Vec<WorkspaceGroup> = Vec::new();
     for member in metadata.workspace_members() {
         let package = metadata
@@ -530,7 +528,7 @@ mod tests {
         let sample_metadata =
             sample_metadata.replace("/home/user/problematic/workspace", &root.to_string_lossy());
         let metadata: Metadata = sample_metadata.parse()?;
-        let groups = workspace_cache_groups(&metadata, &[])?;
+        let groups = workspace_cache_groups(&metadata)?;
         assert!(groups.iter().any(|group| group
             .packages
             .contains(&"b_in_workspace_lib".to_owned())
@@ -539,17 +537,24 @@ mod tests {
     }
 
     #[test]
-    fn workspace_prepare_rejects_extra_cargo_arguments() -> anyhow::Result<()> {
-        let sample_metadata = std::fs::read_to_string("tests/assets/sample_metadata.json")?;
-        let metadata: Metadata = sample_metadata.parse()?;
-        let error = workspace_cache_groups(&metadata, &["--all-features".to_owned()])
-            .err()
-            .context("workspace arguments must be rejected")?;
+    fn workspace_prepare_passes_cargo_arguments_to_each_group() {
+        let packages = vec!["first".to_owned(), "second".to_owned()];
+        let flags = vec!["--all-targets".to_owned(), "--all-features".to_owned()];
         assert_eq!(
-            error.to_string(),
-            "workspace preparation does not accept Cargo arguments"
+            workspace_cargo_args(&packages, &flags),
+            [
+                "-p",
+                "first",
+                "-p",
+                "second",
+                "--all-targets",
+                "--all-features"
+            ]
         );
-        Ok(())
+        assert_eq!(
+            workspace_cargo_args(&packages, &[]),
+            ["-p", "first", "-p", "second"]
+        );
     }
 
     #[test]
