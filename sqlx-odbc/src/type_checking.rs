@@ -10,6 +10,7 @@ sqlx_core::impl_type_checking!(
         "DECIMAL" => Some("rust_decimal"),
         _ => None,
     },
+    numeric-priority: |info: &crate::OdbcTypeInfo| info.0.as_ref() == "DECIMAL",
     datetime-types: {
         chrono: { sqlx::types::chrono::NaiveDate, sqlx::types::chrono::NaiveTime, sqlx::types::chrono::NaiveDateTime },
         time: {},
@@ -19,3 +20,67 @@ sqlx_core::impl_type_checking!(
         rust_decimal: { sqlx::types::Decimal },
     },
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::OdbcTypeInfo;
+    use sqlx_core::{
+        config::macros::{NumericCrate, PreferredCrates},
+        type_checking::{Error, TypeChecking},
+    };
+
+    #[test]
+    fn decimal_inference_is_exact() {
+        let preferred = PreferredCrates::default();
+        let decimal = OdbcTypeInfo("DECIMAL".into());
+        if cfg!(feature = "rust_decimal") {
+            assert!(matches!(
+                Odbc::param_type_for_id(&decimal, &preferred),
+                Ok("sqlx::types::Decimal")
+            ));
+            assert!(matches!(
+                Odbc::return_type_for_id(&decimal, &preferred),
+                Ok("sqlx::types::Decimal")
+            ));
+        } else {
+            assert!(matches!(
+                Odbc::param_type_for_id(&decimal, &preferred),
+                Err(Error::NoMappingFound)
+            ));
+            assert!(matches!(
+                Odbc::return_type_for_id(&decimal, &preferred),
+                Err(Error::NoMappingFound)
+            ));
+        }
+
+        let disabled = PreferredCrates {
+            numeric: NumericCrate::BigDecimal,
+            ..Default::default()
+        };
+        assert!(matches!(
+            Odbc::param_type_for_id(&decimal, &disabled),
+            Err(Error::NumericCrateFeatureNotEnabled)
+        ));
+        assert!(matches!(
+            Odbc::return_type_for_id(&decimal, &disabled),
+            Err(Error::NumericCrateFeatureNotEnabled)
+        ));
+    }
+
+    #[test]
+    fn floating_point_inference_is_unchanged() {
+        let preferred = PreferredCrates::default();
+        for (name, expected) in [("REAL", "f32"), ("DOUBLE", "f64")] {
+            let info = OdbcTypeInfo(name.into());
+            assert_eq!(
+                Odbc::param_type_for_id(&info, &preferred).ok(),
+                Some(expected)
+            );
+            assert_eq!(
+                Odbc::return_type_for_id(&info, &preferred).ok(),
+                Some(expected)
+            );
+        }
+    }
+}

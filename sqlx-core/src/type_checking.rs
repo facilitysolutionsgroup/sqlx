@@ -159,10 +159,12 @@ macro_rules! select_input_type {
 macro_rules! impl_type_checking {
     (
         $database:path {
+
             $($(#[$meta:meta])? $ty:ty $(| $input:ty)?),*$(,)?
         },
         ParamChecking::$param_checking:ident,
         feature-types: $ty_info:ident => $get_gate:expr,
+        $(numeric-priority: $prefer_numeric:expr,)?
         datetime-types: {
             chrono: {
                 $($chrono_ty:ty $(| $chrono_input:ty)?),*$(,)?
@@ -192,6 +194,7 @@ macro_rules! impl_type_checking {
 
                 // Check non-special types
                 // ---------------------
+                let prefer_numeric = false $(|| $prefer_numeric(info))?;
                 $(
                     $(#[$meta])?
                     if <$ty as sqlx_core::types::Type<$database>>::type_info() == *info {
@@ -201,7 +204,7 @@ macro_rules! impl_type_checking {
 
                 $(
                     $(#[$meta])?
-                    if <$ty as sqlx_core::types::Type<$database>>::compatible(info) {
+                    if !prefer_numeric && <$ty as sqlx_core::types::Type<$database>>::compatible(info) {
                         return Ok($crate::select_input_type!($ty $(, $input)?));
                     }
                 )*
@@ -332,6 +335,7 @@ macro_rules! impl_type_checking {
 
                 // Check non-special types
                 // ---------------------
+                let prefer_numeric = false $(|| $prefer_numeric(info))?;
                 $(
                     $(#[$meta])?
                     if <$ty as sqlx_core::types::Type<$database>>::type_info() == *info {
@@ -341,7 +345,7 @@ macro_rules! impl_type_checking {
 
                 $(
                     $(#[$meta])?
-                    if <$ty as sqlx_core::types::Type<$database>>::compatible(info) {
+                    if !prefer_numeric && <$ty as sqlx_core::types::Type<$database>>::compatible(info) {
                         return Ok(stringify!($ty));
                     }
                 )*
