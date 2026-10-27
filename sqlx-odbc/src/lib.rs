@@ -6,6 +6,7 @@ mod data;
 mod decimal;
 mod error;
 mod execution;
+pub mod literal;
 #[cfg(feature = "chrono")]
 mod temporal;
 #[cfg(feature = "offline")]
@@ -13,6 +14,7 @@ mod type_checking;
 pub mod types;
 mod worker;
 pub use error::OdbcDatabaseError;
+pub use literal::SqlInt;
 #[cfg(test)]
 mod tests;
 

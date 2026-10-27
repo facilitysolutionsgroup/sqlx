@@ -378,6 +378,13 @@ impl OdbcArguments {
                             odbc_api::buffers::Indicator::Length(data.len()),
                         ),
                     }),
+                    crate::literal::LITERAL_TYPE => {
+                        return Err(
+                            "SqlInt arguments are spliced into the statement text and \
+                             cannot be bound as parameters"
+                                .into(),
+                        );
+                    }
                     _ => return Err("unsupported ODBC parameter type".into()),
                 };
                 Ok(parameter)

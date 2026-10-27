@@ -86,15 +86,18 @@ impl NativeConnection for CachedConnection {
         arguments: OdbcArguments,
         output: &flume::Sender<crate::execution::Output>,
     ) -> Result<(), Error> {
+        let mut arguments = arguments;
+        let literals = crate::literal::take_literal_arguments(&mut arguments)?;
+        let sql = crate::literal::substitute(sql, &literals)?;
         let parameters = arguments.to_native_parameters().map_err(Error::Encode)?;
-        let mut entry = if let Some(index) = self.entries.iter().position(|(key, _)| key == sql) {
+        let mut entry = if let Some(index) = self.entries.iter().position(|(key, _)| key == &sql) {
             self.entries.remove(index).unwrap().1
         } else {
             Entry {
                 statement: self
                     .connection
                     .clone()
-                    .into_prepared(sql)
+                    .into_prepared(&sql)
                     .map_err(map_error)?,
                 parameters: Vec::new(),
             }

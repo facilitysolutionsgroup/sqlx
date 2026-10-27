@@ -8,7 +8,12 @@ pub(crate) fn describe(
     connection: &odbc_api::Connection<'_>,
     sql: &str,
 ) -> Result<sqlx_core::describe::Describe<crate::Odbc>, Error> {
-    let mut statement = connection.prepare(sql).map_err(map_error)?;
+    // Literal markers are not bindable parameters, so describing replaces them with a dummy
+    // literal; the metadata does not depend on the value.
+    let described_sql = crate::literal::describe_sql(sql)?;
+    let mut statement =
+        connection.prepare(described_sql.as_deref().unwrap_or(sql))
+            .map_err(map_error)?;
     let columns = columns(&mut statement)?.to_vec();
     let nullable = (1..=columns.len())
         .map(|index| {
@@ -38,6 +43,7 @@ pub(crate) fn describe(
         Ok(types) => Either::Left(types),
         Err(_) => Either::Right(usize::from(count)),
     });
+    let parameters = crate::literal::describe_parameters(parameters, sql)?;
     Ok(sqlx_core::describe::Describe {
         columns,
         parameters,
