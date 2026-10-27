@@ -1,9 +1,15 @@
 use crate::Odbc;
-#[cfg(any(feature = "chrono", feature = "rust_decimal"))]
-use sqlx_core as sqlx;
+
+// The paths used below will also be emitted by the macros so they have to match the final
+// facade.
+#[allow(unused_imports, dead_code)]
+mod sqlx {
+    pub use crate as odbc;
+    pub use sqlx_core::*;
+}
 
 sqlx_core::impl_type_checking!(
-    Odbc { bool, i8, i16, i32, i64, f32, f64, String | &str, Vec<u8> | &[u8] },
+    Odbc { bool, i8, i16, i32, i64, f32, f64, String | &str, Vec<u8> | &[u8], sqlx::odbc::SqlInt },
     ParamChecking::Strong,
     feature-types: info => match info.0.as_ref() {
         "DATE" | "TIME" | "TIMESTAMP" => Some("chrono"),
